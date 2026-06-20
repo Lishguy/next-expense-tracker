@@ -123,7 +123,7 @@ const AIInsights = () => {
   };
 
   const getInsightColors = (type: string) => {
-    switch (type) {
+    switch (type) { 
       case 'warning':
         return 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20';
       case 'success':

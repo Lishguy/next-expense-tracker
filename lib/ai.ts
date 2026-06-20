@@ -34,6 +34,128 @@ export interface AIInsight {
   confidence: number;
 }
 
+function buildHeuristicInsights(expenses: ExpenseRecord[]): AIInsight[] {
+  if (expenses.length === 0) {
+    return [
+      {
+        id: 'heuristic-empty-1',
+        type: 'info',
+        title: 'Start Tracking to Unlock Insights',
+        message:
+          'Add a few expenses and I will highlight your biggest spending categories, alerts, and saving opportunities.',
+        action: 'Add your first expense',
+        confidence: 1,
+      },
+    ];
+  }
+
+  const categoryTotals = expenses.reduce(
+    (acc, expense) => {
+      const category = expense.category || 'Other';
+      if (!acc[category]) {
+        acc[category] = { total: 0, count: 0 };
+      }
+
+      acc[category].total += expense.amount;
+      acc[category].count += 1;
+      return acc;
+    },
+    {} as Record<string, { total: number; count: number }>
+  );
+
+  const totalSpend = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const topCategories = Object.entries(categoryTotals)
+    .map(([category, data]) => ({ category, ...data }))
+    .sort((a, b) => b.total - a.total);
+
+  const insights: AIInsight[] = [];
+  const topCategory = topCategories[0];
+
+  if (topCategory && totalSpend > 0) {
+    const share = topCategory.total / totalSpend;
+    insights.push({
+      id: 'heuristic-top-category',
+      type: share >= 0.35 ? 'warning' : 'info',
+      title: `Top Spending Area: ${topCategory.category}`,
+      message: `${topCategory.category} is your largest category at $${topCategory.total.toFixed(
+        2
+      )}, which is ${Math.round(share * 100)}% of your recent spending.`,
+      action: `Review ${topCategory.category.toLowerCase()} expenses`,
+      confidence: 0.9,
+    });
+  }
+
+  const transportation = categoryTotals.Transportation;
+  if (transportation && transportation.total > Math.max(25, totalSpend * 0.2)) {
+    insights.push({
+      id: 'heuristic-transportation',
+      type: 'warning',
+      title: 'Transportation Cost Alert',
+      message: `Transportation spending is $${transportation.total.toFixed(
+        2
+      )} across ${transportation.count} expenses. That is high enough to review fuel, rideshare, parking, or transit costs.`,
+      action: 'Check fuel, rideshare, and parking costs',
+      confidence: 0.92,
+    });
+  }
+
+  const shopping = categoryTotals.Shopping;
+  if (shopping && shopping.total > Math.max(25, totalSpend * 0.2)) {
+    insights.push({
+      id: 'heuristic-shopping',
+      type: 'warning',
+      title: 'Shopping Spree Alert',
+      message: `Shopping spending reached $${shopping.total.toFixed(
+        2
+      )} across ${shopping.count} purchases. That pattern often means impulse buying or repeated small purchases.`,
+      action: 'Pause nonessential purchases for a few days',
+      confidence: 0.91,
+    });
+  }
+
+  const food = categoryTotals.Food;
+  if (food && food.total > Math.max(20, totalSpend * 0.15)) {
+    insights.push({
+      id: 'heuristic-food',
+      type: 'tip',
+      title: 'Food and Dining Check-in',
+      message: `Food spending is $${food.total.toFixed(
+        2
+      )} across ${food.count} transactions. Small coffee and takeout purchases can add up quickly.`,
+      action: 'Set a weekly food budget',
+      confidence: 0.88,
+    });
+  }
+
+  if (topCategories.length >= 2) {
+    const secondCategory = topCategories[1];
+    insights.push({
+      id: 'heuristic-second-category',
+      type: 'info',
+      title: `Second Highest Category: ${secondCategory.category}`,
+      message: `${secondCategory.category} is your second biggest category at $${secondCategory.total.toFixed(
+        2
+      )}. Comparing it with your top category can reveal where to cut back fastest.`,
+      action: `Compare ${secondCategory.category.toLowerCase()} spending`,
+      confidence: 0.84,
+    });
+  }
+
+  if (insights.length < 3) {
+    insights.push({
+      id: 'heuristic-balance',
+      type: 'success',
+      title: 'Spending Looks Balanced',
+      message:
+        'Your expenses are spread across categories without one extreme spike. Keep tracking to spot trends earlier.',
+      action: 'Continue logging expenses',
+      confidence: 0.8,
+    });
+  }
+
+  return insights.slice(0, 4);
+}
+
 export async function generateExpenseInsights(
   expenses: ExpenseRecord[]
 ): Promise<AIInsight[]> {
@@ -104,11 +226,19 @@ export async function generateExpenseInsights(
     // Parse AI response
     const insights = JSON.parse(cleanedResponse);
 
+    if (!Array.isArray(insights) || insights.length === 0) {
+      throw new Error('AI returned an empty or invalid insight array');
+    }
+
     // Add IDs and ensure proper format
     const formattedInsights = insights.map(
       (insight: RawInsight, index: number) => ({
         id: `ai-${Date.now()}-${index}`,
-        type: insight.type || 'info',
+        type: ['warning', 'info', 'success', 'tip'].includes(
+          insight.type || ''
+        )
+          ? (insight.type as AIInsight['type'])
+          : 'info',
         title: insight.title || 'AI Insight',
         message: insight.message || 'Analysis complete',
         action: insight.action,
@@ -120,42 +250,13 @@ export async function generateExpenseInsights(
   } catch (error) {
     console.error('❌ Error generating AI insights:', error);
 
-    // Fallback to mock insights if AI fails
-    return [
-      {
-        id: 'fallback-1',
-        type: 'info',
-        title: 'AI Analysis Unavailable',
-        message:
-          'Unable to generate personalized insights at this time. Please try again later.',
-        action: 'Refresh insights',
-        confidence: 0.5,
-      },
-    ];
+    // Fallback to deterministic insights so the tab still stays useful.
+    return buildHeuristicInsights(expenses);
   }
 }
 
 export async function categorizeExpense(description: string): Promise<string> {
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'deepseek/deepseek-chat-v3-0324:free',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are an expense categorization AI. Categorize expenses into one of these categories: Food, Transportation, Entertainment, Shopping, Bills, Healthcare, Other. Respond with only the category name.',
-        },
-        {
-          role: 'user',
-          content: `Categorize this expense: "${description}"`,
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 20,
-    });
-
-    const category = completion.choices[0].message.content?.trim();
-
     const validCategories = [
       'Food',
       'Transportation',
@@ -166,10 +267,128 @@ export async function categorizeExpense(description: string): Promise<string> {
       'Other',
     ];
 
-    const finalCategory = validCategories.includes(category || '')
-      ? category!
-      : 'Other';
-    return finalCategory;
+    const normalizedDescription = description.toLowerCase().trim();
+
+    const keywordRules: Array<{ category: string; keywords: string[] }> = [
+      {
+        category: 'Transportation',
+        keywords: [
+          'gas',
+          'fuel',
+          'petrol',
+          'diesel',
+          'uber',
+          'lyft',
+          'taxi',
+          'bus',
+          'train',
+          'metro',
+          'subway',
+          'transit',
+          'parking',
+          'toll',
+          'fare',
+        ],
+      },
+      {
+        category: 'Food',
+        keywords: [
+          'coffee',
+          'cafe',
+          'restaurant',
+          'lunch',
+          'dinner',
+          'breakfast',
+          'groceries',
+          'grocery',
+          'meal',
+          'food',
+          'snack',
+          'pizza',
+          'burger',
+          'takeout',
+          'delivery',
+          'dining',
+        ],
+      },
+      {
+        category: 'Bills',
+        keywords: [
+          'rent',
+          'electric',
+          'water',
+          'internet',
+          'phone',
+          'utility',
+          'utilities',
+          'bill',
+          'subscription',
+          'netflix',
+          'spotify',
+        ],
+      },
+      {
+        category: 'Healthcare',
+        keywords: [
+          'doctor',
+          'medicine',
+          'pharmacy',
+          'prescription',
+          'hospital',
+          'clinic',
+          'dental',
+          'dentist',
+          'health',
+          'medical',
+        ],
+      },
+      {
+        category: 'Entertainment',
+        keywords: [
+          'movie',
+          'cinema',
+          'concert',
+          'game',
+          'games',
+          'streaming',
+          'netflix',
+          'youtube',
+          'music',
+          'theater',
+        ],
+      },
+      {
+        category: 'Shopping',
+        keywords: ['amazon', 'store', 'clothes', 'clothing', 'shoes', 'mall', 'shopping'],
+      },
+    ];
+
+    for (const rule of keywordRules) {
+      if (rule.keywords.some((keyword) => normalizedDescription.includes(keyword))) {
+        return rule.category;
+      }
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: 'deepseek/deepseek-chat-v3-0324:free',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an expense categorization AI. Categorize expenses into exactly one of these categories: Food, Transportation, Entertainment, Shopping, Bills, Healthcare, Other. Use Transportation for fuel, gas, rideshare, transit, parking, and tolls. Use Food for coffee, restaurants, groceries, dining, and meals. Prefer the most specific category. Respond with only the category name.',
+        },
+        {
+          role: 'user',
+          content: `Categorize this expense description into one category: "${description}"`,
+        },
+      ],
+      temperature: 0,
+      max_tokens: 20,
+    });
+
+    const category = completion.choices[0].message.content?.trim();
+
+    return validCategories.includes(category || '') ? category! : 'Other';
   } catch (error) {
     console.error('❌ Error categorizing expense:', error);
     return 'Other';
